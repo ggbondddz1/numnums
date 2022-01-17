@@ -7,8 +7,9 @@
 //! reusable parsers to feed your nom
 //!
 use nom::branch::alt;
-use nom::bytes::complete::{is_not, tag};
-use nom::sequence::{delimited, terminated, tuple};
+use nom::bytes::complete::{is_not, tag, take_until};
+use nom::multi::{fold_many0, many0};
+use nom::sequence::{delimited, pair, preceded, terminated, tuple};
 use nom::Parser;
 
 /// finds either \(\) or \(something\)
@@ -140,12 +141,54 @@ impl<'a> Parser<&'a str, &'a str, ()> for MarkdownImageBrackets {
     }
 }
 
+/// finds all urls "\[maybe_something\]\(maybe_something\)"
+/// but not image urls "\![maybe_something\]\(maybe_something\)"
+pub struct MarkdownUrls;
+
+/// type alias for complex type used as result from MarkdownUrls
+pub type MarkdownUrlsResults<'a> =
+    Result<(&'a str, Vec<(&'a str, (&'a str, &'a str))>), nom::Err<()>>;
+
+impl<'a> Parser<&'a str, Vec<(&'a str, (&'a str, &'a str))>, ()> for MarkdownUrls {
+    fn parse(&mut self, input: &'a str) -> MarkdownUrlsResults<'a> {
+        fold_many0(
+            pair(take_until("["), MarkdownUrl),
+            Vec::new,
+            |mut acc: Vec<_>, item| {
+                //here we want to inspect what we took_until with `take_until` so we can verify
+                //we want to actually accumulate this instead of skipping it
+                //but how in the heck to we get access to it each time we fold?
+                if !item.0.ends_with('!') {
+                    acc.push(item);
+                }
+                acc
+            },
+        )(input)
+    }
+}
+
 /// finds "\[maybe_something\]\(maybe_something\)"
 pub struct MarkdownUrl;
 
 impl<'a> Parser<&'a str, (&'a str, &'a str), ()> for MarkdownUrl {
     fn parse(&mut self, input: &'a str) -> Result<(&'a str, (&'a str, &'a str)), nom::Err<()>> {
         tuple((Brackets, Parens))(input)
+    }
+}
+
+/// finds all images "!\[maybe_something\]\(maybe_something\)"
+/// but not plain markdown urls "\[maybe_something\]\(maybe_something\)"
+pub struct MarkdownImages;
+
+/// type alias for complex type used as result from MarkdownImages
+pub type MarkdownImagesResults<'a> = Result<(&'a str, Vec<(&'a str, &'a str)>), nom::Err<()>>;
+
+impl<'a> Parser<&'a str, Vec<(&'a str, &'a str)>, ()> for MarkdownImages {
+    fn parse(&mut self, input: &'a str) -> MarkdownImagesResults<'a> {
+        many0(preceded(
+            take_until("!["),
+            tuple((MarkdownImageBrackets, Parens)),
+        ))(input)
     }
 }
 
@@ -163,14 +206,11 @@ pub struct MarkdownImageAltText;
 
 impl<'a> Parser<&'a str, Vec<&'a str>, ()> for MarkdownImageAltText {
     fn parse(&mut self, input: &'a str) -> Result<(&'a str, Vec<&'a str>), nom::Err<()>> {
-        println!("INPUT: {:?}", input);
         MarkdownImage.parse(input).map(|v| {
             let image = v.1;
             // now we need to parse the words which could be separated by one ore more spaces
             // like so: word1 word2   word3  word4
             let words = image.0.split_ascii_whitespace().collect();
-            println!("ALT TEXT WORDS: {}", image.0.trim());
-
             (image.1, words)
         })
     }
@@ -237,6 +277,19 @@ mod tests {
         let token = recognize(MarkdownImage)(input)?;
 
         assert_eq!(token, ("", "![image word](abcd)"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn recognize_markdown_url_not_image() -> anyhow::Result<()> {
+        let input = "here's some other stuff ![image](abcd) here's [some anchor](please find me!) some more stuff";
+
+        let token = MarkdownUrls.parse(input)?;
+        let count = token.1.len();
+
+        assert_eq!(count, 1);
+        //assert_eq!(token.1, vec![("", "[image](abcd)")]);
 
         Ok(())
     }
